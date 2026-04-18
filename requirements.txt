@@ -1,4 +1,8 @@
 numpy
-opencv-python
+opencv-python-headless
 pillow
 scipy
+fastapi
+uvicorn
+python-multipart
+gunicorn

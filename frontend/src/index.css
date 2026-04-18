@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+:root {
+  background-color: #0f172a; /* bg-slate-900 */
+  color: white;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
