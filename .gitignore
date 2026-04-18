@@ -2,3 +2,22 @@
 __pycache__/
 outputs/
 *.pyc
+
+# Node / React
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+
+# Environments / Secrets (สำคัญมาก)
+.env
+.env.local
+.env.production
+frontend/.env
+frontend/.env.production
+
+# Virtual Environment (เพิ่มตัวนี้ด้วยถ้าคุณสร้าง venv/ โดยไม่มีจุด)
+venv/
+
+# OS files
+.DS_Store
