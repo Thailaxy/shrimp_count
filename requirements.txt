@@ -1,5 +1,9 @@
+numpy
+opencv-python-headless
+pillow
+scipy
 fastapi
 uvicorn
 python-multipart
-numpy
-opencv-python-headless
+gunicorn
+boto3
