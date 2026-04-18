@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import imageCompression from 'browser-image-compression';
-import { Camera, Upload, RefreshCw, AlertTriangle, Minus, Plus, Loader2 } from 'lucide-react';
+import { Camera, Upload, RefreshCw, AlertTriangle, Minus, Plus, Loader2, ChevronDown, ChevronUp, Box, Circle } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -12,11 +12,26 @@ const App = () => {
   const [manualAdjustment, setManualAdjustment] = useState(0);
   const [error, setError] = useState(null);
   const [mode, setMode] = useState(null); // null, 'camera', or 'upload'
+  const [detectionMode, setDetectionMode] = useState('circle');
+  const [showBreakdown, setShowBreakdown] = useState(false);
 
   const videoRef = useRef(null);
-  const longPressTimer = useRef(null);
 
-  // Initialize Camera - Now manually triggered
+  // Fix 2: Explicit mode change logic to reset state
+  const handleModeChange = (newMode) => {
+    stopCamera();
+    setResult(null);
+    setError(null);
+    setManualAdjustment(0);
+    setShowBreakdown(false);
+    
+    if (newMode === 'camera') {
+      startCamera();
+    } else {
+      setMode(newMode);
+    }
+  };
+
   const startCamera = async () => {
     setMode('camera');
     setError(null);
@@ -25,7 +40,6 @@ const App = () => {
         video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }
       });
       setStream(mediaStream);
-      // Use a small timeout to ensure the video element is rendered before setting srcObject
       setTimeout(() => {
         if (videoRef.current) {
           videoRef.current.srcObject = mediaStream;
@@ -58,6 +72,8 @@ const App = () => {
       const compressedFile = await imageCompression(file, options);
       const formData = new FormData();
       formData.append('file', compressedFile, 'capture.jpg');
+      // Fix 3: Passing detection mode to backend
+      formData.append('detection_mode', detectionMode);
 
       const response = await axios.post(`${API_URL}/count`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
@@ -106,7 +122,6 @@ const App = () => {
 
   return (
     <div className="flex flex-col min-h-screen w-full bg-[#0f172a] text-slate-50 font-sans selection:bg-blue-500/30">
-      {/* App Header */}
       <header className="sticky top-0 z-30 w-full bg-slate-900/80 backdrop-blur-md border-b border-slate-800 px-6 py-4">
         <div className="max-w-md mx-auto flex items-center justify-between">
           <h1 className="text-xl font-bold tracking-tight">
@@ -114,7 +129,7 @@ const App = () => {
           </h1>
           {result && (
             <button 
-              onClick={() => {setResult(null); setMode(null);}}
+              onClick={() => {setResult(null); setMode(null); setShowBreakdown(false);}}
               className="text-xs font-bold uppercase tracking-widest text-slate-400 hover:text-white transition"
             >
               Reset
@@ -131,6 +146,7 @@ const App = () => {
           </div>
         )}
 
+        {/* Initial Screen with Fix 3: Detection Mode Toggle */}
         {!result && !mode && !loading && (
           <div className="flex-1 flex flex-col items-center justify-center text-center space-y-8 animate-in fade-in zoom-in duration-500">
             <div className="w-24 h-24 bg-blue-500/10 rounded-full flex items-center justify-center border border-blue-500/20">
@@ -139,6 +155,24 @@ const App = () => {
             <div className="space-y-2">
               <h2 className="text-2xl font-bold">Ready to count?</h2>
               <p className="text-slate-400 text-sm px-8">Align your bowl under even lighting for the most accurate results.</p>
+            </div>
+
+            {/* Fix 3: Detection Mode Toggle UI */}
+            <div className="bg-slate-800/50 p-1.5 rounded-2xl border border-slate-700 flex">
+              <button 
+                onClick={() => setDetectionMode('circle')}
+                className={`flex items-center gap-2 px-6 py-3 rounded-xl text-xs font-bold transition-all ${detectionMode === 'circle' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}
+              >
+                <Circle size={14} />
+                Circle
+              </button>
+              <button 
+                onClick={() => setDetectionMode('rectangle')}
+                className={`flex items-center gap-2 px-6 py-3 rounded-xl text-xs font-bold transition-all ${detectionMode === 'rectangle' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}
+              >
+                <Box size={14} />
+                Rectangle
+              </button>
             </div>
           </div>
         )}
@@ -174,7 +208,7 @@ const App = () => {
                   fill="white" 
                   className="text-[10px] font-bold uppercase tracking-[0.2em] fill-emerald-400 drop-shadow-md"
                 >
-                  Place bowl inside the circle
+                  Place {detectionMode} inside
                 </text>
               </svg>
             </div>
@@ -199,28 +233,59 @@ const App = () => {
 
         {result && !loading && (
           <div className="flex-1 flex flex-col space-y-10 animate-in fade-in slide-in-from-bottom-8 duration-700">
-            {/* Hero Count Display */}
             <div className="text-center space-y-2">
-              <p className="text-xs font-black tracking-[0.3em] text-slate-500 uppercase">Shrimp Count</p>
+              <p className="text-xs font-black tracking-[0.3em] text-slate-500 uppercase">Shrimp Count ({detectionMode})</p>
               <h3 className="text-[8rem] leading-none font-black text-white tracking-tighter drop-shadow-2xl">
                 {result.count + manualAdjustment}
               </h3>
               <div className={`inline-flex px-6 py-2 rounded-full text-xs font-black tracking-widest uppercase shadow-lg ${getConfidenceStyles(result.confidence)}`}>
                 {result.confidence} Confidence
               </div>
+              
+              {/* Fix 4: Collapsible Method Breakdown */}
+              <div className="pt-4">
+                <button 
+                  onClick={() => setShowBreakdown(!showBreakdown)}
+                  className="inline-flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-slate-300 transition"
+                >
+                  How was this calculated?
+                  {showBreakdown ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                </button>
+                
+                {showBreakdown && (
+                  <div className="mt-4 p-4 bg-slate-900/50 border border-slate-800 rounded-2xl text-left animate-in slide-in-from-top-2 duration-300">
+                    <table className="w-full text-[11px] font-medium text-slate-400">
+                      <tbody>
+                        {Object.entries(result.methods).map(([name, count]) => (
+                          <tr key={name} className="border-b border-slate-800/50">
+                            <td className="py-2 capitalize">{name.replace('_', ' ')}:</td>
+                            <td className="py-2 text-right font-bold text-white">{count}</td>
+                          </tr>
+                        ))}
+                        <tr className="text-blue-400">
+                          <td className="py-3 font-bold uppercase tracking-wider">Final (Median):</td>
+                          <td className="py-3 text-right font-black text-xl">{result.count}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                    <p className="mt-3 text-[10px] text-slate-500 leading-relaxed italic">
+                      The final count is the median of all 4 methods to reduce error from lighting and image conditions.
+                    </p>
+                  </div>
+                )}
+              </div>
             </div>
 
-            {/* Overlay Image */}
-            <div className="relative rounded-3xl overflow-hidden border-2 border-slate-800 bg-slate-900 shadow-2xl">
+            {/* Fix 1: Overlay containment styling */}
+            <div className="relative rounded-3xl overflow-hidden border-2 border-slate-800 bg-slate-900 shadow-2xl aspect-[3/4] flex items-center justify-center">
               <img 
                 src={result.overlay} 
                 alt="Detection Overlay" 
-                className="w-full h-auto"
+                className="w-full h-full object-contain pointer-events-none"
               />
               <div className="absolute inset-0 pointer-events-none ring-1 ring-inset ring-white/10 rounded-3xl" />
             </div>
 
-            {/* Tap-to-correct row */}
             <div className="flex items-center justify-between bg-slate-800/50 rounded-3xl p-2 border border-slate-700">
               <button 
                 onClick={() => setManualAdjustment(prev => prev - 1)}
@@ -256,19 +321,18 @@ const App = () => {
         )}
       </main>
 
-      {/* Fixed Footer Actions */}
       {!loading && (
         <footer className="fixed bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-[#0f172a] via-[#0f172a]/95 to-transparent z-40">
           <div className="max-w-md mx-auto flex gap-4">
             <button 
-              onClick={startCamera}
+              onClick={() => handleModeChange('camera')}
               className={`flex-1 h-14 flex items-center justify-center gap-2 rounded-2xl font-bold transition-all active:scale-95 ${mode === 'camera' ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20' : 'bg-slate-800 text-slate-300 border border-slate-700'}`}
             >
               <Camera size={20} />
               <span>Camera</span>
             </button>
             <button 
-              onClick={() => {stopCamera(); setMode('upload');}}
+              onClick={() => handleModeChange('upload')}
               className={`flex-1 h-14 flex items-center justify-center gap-2 rounded-2xl font-bold transition-all active:scale-95 ${mode === 'upload' ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20' : 'bg-slate-800 text-slate-300 border border-slate-700'}`}
             >
               <Upload size={20} />
