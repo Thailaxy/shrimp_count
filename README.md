@@ -4,19 +4,23 @@ Small OpenCV-based tool to estimate shrimp count from a bowl photo, transitionin
 
 ## 🚀 Live Project Links
 - **Backend API:** [https://shrimp-count.onrender.com/health](https://shrimp-count.onrender.com/health)
-- **Frontend App:** [Cloudflare Pages URL will go here after success]
+- **Frontend App:** [https://shrimpcount.wanakorn-k.workers.dev](https://shrimpcount.wanakorn-k.workers.dev)
 
-## Current Progress (Week 3: Deployment)
-- **Backend (FastAPI):** Live on Render.com with `/health` and `/count` endpoints.
-- **Frontend (React):** Prepared for Cloudflare Pages.
+## 📝 Deployment Lessons Learned (Week 3)
 
-### Cloudflare Pages Settings (IMPORTANT)
-If your build fails, check these settings in the Cloudflare Dashboard (**Settings > Build & deployments**):
-- **Framework preset:** `Vite`
-- **Build command:** `npm run build`
-- **Build output directory:** `dist`
-- **Root directory:** `frontend`
-- **Environment Variable:** `VITE_API_URL` should be `https://shrimp-count.onrender.com`
+### Backend (Render.com)
+- **OpenCV Version:** Use `opencv-python-headless` instead of `opencv-python` to avoid GUI/display driver errors on server-side environments.
+- **Port Binding:** Ensure `uvicorn` or `gunicorn` binds to `0.0.0.0` to be accessible externally.
+
+### Frontend (Cloudflare Workers/Pages)
+- **Root Directory:** When the React app is in a subdirectory (e.g., `/frontend`), set the **Path/Root Directory** in the dashboard to `frontend` so `npm` finds `package.json`.
+- **Wrangler Configuration:** For "Assets-only" deployments:
+  - Keep `wrangler.json` simple. **Do not** add `assets.binding = "ASSETS"` as it causes a ✘ [ERROR] in simple frontend-only setups.
+  - **_redirects:** Be careful with wildcard redirects like `/* /index.html 200` in Workers; they can trigger infinite loop errors (Code 10021) if not handled by a specific routing Worker.
+- **Build Settings:** 
+  - **Build Command:** `npm run build`
+  - **Deploy Command:** `npx wrangler deploy` (if using Workers Assets)
+  - **Output Directory:** `dist`
 
 ## Roadmap
 
