@@ -63,8 +63,14 @@ const App = () => {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
 
-      setResult(response.data);
-      setManualAdjustment(0);
+      if (response.data.error) {
+        setError(response.data.error);
+        setResult(null);
+      } else {
+        setResult(response.data);
+        setManualAdjustment(0);
+        setError(null);
+      }
       setMode(null);
     } catch (err) {
       console.error("Upload error:", err);
