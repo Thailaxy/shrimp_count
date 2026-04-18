@@ -1,44 +1,65 @@
-# Shrimp Counter
+# 🦐 ShrimpCount: Technical Handover Document
 
-Small OpenCV-based tool to estimate shrimp count from a bowl photo, transitioning into a robust field-ready web application.
+## 1. Project Vision
+ShrimpCount is a field-ready tool designed for shrimp farmers to estimate populations from a bowl photo. It solves the unreliability of outdoor lighting by using a **Consensus Method** (Classical CV) while simultaneously building a dataset for a **Phase 2 AI upgrade** (YOLOv8).
 
-## 🚀 Live Project Links
-- **Backend API:** [https://shrimp-count.onrender.com/health](https://shrimp-count.onrender.com/health)
-- **Frontend App:** [https://shrimpcount.wanakorn-k.workers.dev](https://shrimpcount.wanakorn-k.workers.dev)
+## 2. System Architecture
 
-## 📊 Current Status
-**POC Live | Data Collection Active**
-The consensus-based counting engine is operational in the field. Every processed image and its corresponding metrics are automatically archived for the next phase of development.
+### 🔵 Backend (Python / FastAPI)
+- **Host:** Render.com (Free Tier)
+- **Engine (`shrimp_engine.py`):**
+  - **The Consensus Algorithm:** Runs 4 independent detection methods:
+    1. `blob`: Uses OpenCV SimpleBlobDetector.
+    2. `components_p97`: Connected components at 97th percentile threshold.
+    3. `components_p98`: Connected components at 98th percentile threshold.
+    4. `peaks`: Local maxima detection after Gaussian blurring.
+  - **Final Logic:** Returns the **Median** of these 4 to cancel out noise from reflections or shadows.
+  - **Confidence Flagging:** If the "spread" (max - min) is > 30% of the median, the result is flagged as **LOW confidence**.
 
-## 📝 Deployment Lessons Learned (Week 3)
+### 🟠 Frontend (React / Vite / Tailwind v4)
+- **Host:** Cloudflare Workers (Assets-only)
+- **Key Logic:**
+  - **Coordinate Math (Critical):** Since images use `object-fit: contain`, we calculate coordinates relative to the **rendered image boundaries**, not the container. This ensures that the circle you drag in the browser matches the pixels the Python backend sees.
+  - **3-Step Flow:** `Input` -> `Detection Preview` -> `Manual Adjustment (Optional)` -> `Final Count`.
 
-### Backend (Render.com)
-- **OpenCV Version:** Use `opencv-python-headless` instead of `opencv-python` to avoid GUI/display driver errors on server-side environments.
-- **Port Binding:** Ensure `uvicorn` or `gunicorn` binds to `0.0.0.0` to be accessible externally.
+### ⚪️ Storage (Cloudflare R2)
+- **Bucket:** `shrimpcount-images`
+- **Logic:** Every POST to `/count` automatically backs up the compressed image and its JSON metrics. This is your "Gold Mine" for Phase 2 training.
 
-### Frontend (Cloudflare Workers/Pages)
-- **Root Directory:** When the React app is in a subdirectory (e.g., `/frontend`), set the **Path/Root Directory** in the dashboard to `frontend`.
-- **Wrangler Configuration:** For "Assets-only" deployments, keep `wrangler.json` simple. Do not add `assets.binding` as it causes conflicts in simple frontend setups.
+---
 
-## 📂 Data Collection (Phase 2 Preparation)
-All field data is being systematically collected in the **Cloudflare R2 bucket: `shrimpcount-images`**.
-- **Images:** Stored in `images/` folder with `{timestamp}_{uuid}.jpg`.
-- **Metrics:** Stored in `metrics/` folder with `{timestamp}_{uuid}.json`.
-This dataset will be used to fine-tune the YOLOv8 model for production-grade accuracy in varying outdoor conditions.
+## 3. The "Confirm Circle" Flow (Step-by-Step)
+For a junior engineer, this is the most complex part of the code:
+1. **`/detect`**: Fast pass to find the bowl using HoughCircles. Returns coordinates as percentages (0.0 to 1.0).
+2. **Interactive SVG**: We draw a yellow circle over the image. If the user drags it, we update the state in the React app.
+3. **`/count`**: We send the original file + the finalized coordinates. The backend skips its own detection and counts only within the user's circle.
 
-## Roadmap
+---
 
-### ✅ Week 4: Cloudflare R2 Integration (Complete)
-- [x] Integrate `boto3` into the backend.
-- [x] Automated upload of original photos and JSON metrics.
-- [x] Graceful fallback if storage credentials are missing.
+## 4. Maintenance & Operations
 
-### 🔜 Month 2: AI Upgrade (Phase 2)
-- Label collected images from R2 in **Roboflow**.
-- Train **YOLOv8** on Google Colab and export to ONNX/PyTorch.
-- Swap YOLO into the backend as the primary detector, keeping classical CV as a fallback.
+### Deployment Gotchas
+- **Render Cold Starts:** The free tier sleeps. Use a cron-job to ping `/health` every 14 mins.
+- **OpenCV on Server:** Always use `opencv-python-headless`. The standard version requires GUI libraries that don't exist on Render/Docker.
+- **Cloudflare Build:** The **Root Directory** must be set to `frontend`. The **Deploy Command** must be `npx wrangler deploy`.
 
-## Setup (Local Development)
+### Environment Variables
+**Backend (Render):**
+- `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`
+
+**Frontend (Local):**
+- `VITE_API_URL` (Points to `localhost:8000` for dev, Render for prod).
+
+---
+
+## 5. Junior Engineer Task List (Phase 2)
+1. **Rectangle Mode:** The UI has a toggle for "Rectangle" mode. Currently, the backend ignores this. Your first task is to update `shrimp_engine.py` to support rectangular masking.
+2. **Data Labeling:** Once the R2 bucket has 200+ images, download them and use **Roboflow** to label the shrimp heads.
+3. **YOLO Integration:** Train a YOLOv8-nano model and create a new `/count_v2` endpoint that uses the `.pt` or `.onnx` model instead of classical CV.
+
+---
+
+## 6. Local Setup
 
 ### Backend
 ```bash

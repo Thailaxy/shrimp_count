@@ -4,7 +4,7 @@ import imageCompression from 'browser-image-compression';
 import { 
   Camera, Upload, RefreshCw, AlertTriangle, Minus, Plus, 
   Loader2, ChevronDown, ChevronUp, Box, Circle as CircleIcon, 
-  CheckCircle2, Settings2, RotateCcw 
+  CheckCircle2, Settings2, RotateCcw, MinusCircle, PlusCircle
 } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -19,8 +19,8 @@ const App = () => {
   // Image & Detection State
   const [originalFile, setOriginalFile] = useState(null);
   const [detectionMode, setDetectionMode] = useState('circle');
-  const [detectionResult, setDetectionData] = useState(null); // Result from /detect
-  const [manualCircle, setManualCircle] = useState(null); // Adjusted {x_pct, y_pct, r_pct}
+  const [detectionResult, setDetectionData] = useState(null); 
+  const [manualCircle, setManualCircle] = useState(null); // {x_pct, y_pct, r_pct} relative to IMAGE
   const [attempt, setAttempt] = useState(1);
   
   // Final Result State
@@ -33,6 +33,7 @@ const App = () => {
 
   const videoRef = useRef(null);
   const adjustContainerRef = useRef(null);
+  const imageRef = useRef(null);
 
   // --- Helpers ---
   const stopCamera = useCallback(() => {
@@ -61,9 +62,7 @@ const App = () => {
     setError(null);
     setOriginalFile(file);
     try {
-      // Compress first
       const compressed = await imageCompression(file, { maxSizeMB: 0.5, maxWidthOrHeight: 1400 });
-      
       const formData = new FormData();
       formData.append('file', compressed);
       formData.append('attempt', attempt);
@@ -71,8 +70,7 @@ const App = () => {
       const response = await axios.post(`${API_URL}/detect`, formData);
       
       if (response.data.error) {
-        // Fallback to manual adjust if detection fails completely
-        setError(response.data.error + " - Try manual adjustment.");
+        setError(response.data.error + " - Use manual adjustment.");
         setStep('adjust');
         setManualCircle({ x_pct: 0.5, y_pct: 0.5, r_pct: 0.3 });
       } else {
@@ -81,7 +79,7 @@ const App = () => {
         setStep('confirm');
       }
     } catch (err) {
-      setError("Connection error. Is the backend running?");
+      setError("Backend connection failed.");
     } finally {
       setLoading(false);
     }
@@ -93,28 +91,35 @@ const App = () => {
     if (originalFile) startDetection(originalFile);
   };
 
-  // --- Step 2: Adjust Logic ---
+  // --- Step 2: Precise Adjust Logic ---
   const handleAdjustStart = (e) => {
-    if (step !== 'adjust') return;
-    const rect = adjustContainerRef.current.getBoundingClientRect();
-    const touch = e.touches ? e.touches[0] : e;
-    const x = (touch.clientX - rect.left) / rect.width;
-    const y = (touch.clientY - rect.top) / rect.height;
+    if (step !== 'adjust' || !imageRef.current) return;
     
-    // Simple logic: if click near center, drag. If click near edge, resize.
-    const dist = Math.sqrt(Math.pow(x - manualCircle.x_pct, 2) + Math.pow(y - manualCircle.y_pct, 2));
-    const isEdge = Math.abs(dist - manualCircle.r_pct) < 0.05;
+    // Get actual image dimensions (ignoring letterboxing)
+    const imgRect = imageRef.current.getBoundingClientRect();
+    const touch = e.touches ? e.touches[0] : e;
+    
+    // Click position relative to the IMAGE
+    const startX = (touch.clientX - imgRect.left) / imgRect.width;
+    const startY = (touch.clientY - imgRect.top) / imgRect.height;
+    
+    // Check if dragging center or resizing
+    const distToCenter = Math.sqrt(Math.pow(startX - manualCircle.x_pct, 2) + Math.pow(startY - manualCircle.y_pct, 2));
+    const isResize = Math.abs(distToCenter - manualCircle.r_pct) < 0.1;
 
     const moveHandler = (moveEvent) => {
       const mTouch = moveEvent.touches ? moveEvent.touches[0] : moveEvent;
-      const mx = (mTouch.clientX - rect.left) / rect.width;
-      const my = (mTouch.clientY - rect.top) / rect.height;
+      const mx = (mTouch.clientX - imgRect.left) / imgRect.width;
+      const my = (mTouch.clientY - imgRect.top) / imgRect.height;
 
-      if (isEdge) {
-        const newR = Math.sqrt(Math.pow(mx - manualCircle.x_pct, 2) + Math.pow(my - manualCircle.y_pct, 2));
-        setManualCircle(prev => ({ ...prev, r_pct: newR }));
+      if (isResize) {
+          const dx = (mx - manualCircle.x_pct) * imgRect.width;
+          const dy = (my - manualCircle.y_pct) * imgRect.height;
+          const pixelR = Math.sqrt(dx*dx + dy*dy);
+          const maxDim = Math.max(imgRect.width, imgRect.height);
+          setManualCircle(prev => ({ ...prev, r_pct: pixelR / maxDim }));
       } else {
-        setManualCircle(prev => ({ ...prev, x_pct: mx, y_pct: my }));
+          setManualCircle(prev => ({ ...prev, x_pct: mx, y_pct: my }));
       }
     };
 
@@ -147,7 +152,6 @@ const App = () => {
       formData.append('r_pct', coords.r_pct);
 
       const response = await axios.post(`${API_URL}/count`, formData);
-      
       if (response.data.error) {
         setError(response.data.error);
       } else {
@@ -155,13 +159,12 @@ const App = () => {
         setStep('result');
       }
     } catch (err) {
-      setError("Failed to process count.");
+      setError("Count processing failed.");
     } finally {
       setLoading(false);
     }
   };
 
-  // --- Camera Actions ---
   const startCamera = async () => {
     resetAll();
     setMode('camera');
@@ -196,13 +199,6 @@ const App = () => {
     if (file) startDetection(file);
   };
 
-  // --- Render Helpers ---
-  const getConfidenceStyles = (conf) => {
-    if (conf === 'HIGH') return 'bg-emerald-500 text-white';
-    if (conf === 'MEDIUM') return 'bg-amber-500 text-slate-900';
-    return 'bg-red-500 text-white';
-  };
-
   return (
     <div className="flex flex-col min-h-screen w-full bg-[#0f172a] text-slate-50 font-sans selection:bg-blue-500/30">
       <header className="sticky top-0 z-30 w-full bg-slate-900/80 backdrop-blur-md border-b border-slate-800 px-6 py-4">
@@ -216,13 +212,13 @@ const App = () => {
 
       <main className="flex-1 flex flex-col w-full max-w-md mx-auto px-6 pt-6 pb-32">
         {error && (
-          <div className="mb-4 p-3 bg-red-500/10 border border-red-500/50 rounded-xl flex items-center gap-2 text-red-200 text-xs font-medium">
+          <div className="mb-4 p-3 bg-red-500/10 border border-red-500/50 rounded-xl flex items-center gap-2 text-red-200 text-xs font-medium italic">
             <AlertTriangle size={14} className="shrink-0" />
             <span>{error}</span>
           </div>
         )}
 
-        {/* --- Phase 1: Idle/Input --- */}
+        {/* --- Input Selection --- */}
         {step === 'idle' && !loading && (
           <div className="flex-1 flex flex-col items-center justify-center text-center space-y-8 animate-in fade-in duration-500">
             {mode === 'camera' ? (
@@ -233,24 +229,24 @@ const App = () => {
                     <circle cx="50%" cy="50%" r="35%" fill="none" stroke="#10b981" strokeWidth="2" strokeDasharray="8 4" className="opacity-50" />
                   </svg>
                 </div>
-                <button onClick={capture} className="mx-auto w-20 h-20 rounded-full bg-white border-8 border-slate-800 flex items-center justify-center active:scale-90 transition-transform shadow-xl">
+                <button onClick={capture} className="mx-auto w-20 h-20 rounded-full bg-white border-8 border-slate-800 flex items-center justify-center active:scale-90 transition-transform">
                   <div className="w-12 h-12 rounded-full bg-blue-600" />
                 </button>
               </div>
             ) : mode === 'upload' ? (
               <label className="w-full aspect-square flex flex-col items-center justify-center border-2 border-dashed border-slate-700 rounded-[2.5rem] bg-slate-800/30 hover:bg-slate-800/50 cursor-pointer">
                 <Upload size={48} className="mb-4 text-blue-400" />
-                <span className="text-slate-300 font-bold">Choose from Gallery</span>
+                <span className="text-slate-300 font-bold text-sm">Choose from Gallery</span>
                 <input type="file" className="hidden" accept="image/*" onChange={handleFileUpload} />
               </label>
             ) : (
               <>
-                <div className="w-24 h-24 bg-blue-500/10 rounded-full flex items-center justify-center border border-blue-500/20">
-                  <Camera size={40} className="text-blue-400" />
+                <div className="w-20 h-20 bg-blue-500/10 rounded-full flex items-center justify-center border border-blue-500/20">
+                  <Camera size={32} className="text-blue-400" />
                 </div>
-                <div className="space-y-2">
-                  <h2 className="text-2xl font-bold">Ready to count?</h2>
-                  <p className="text-slate-400 text-sm">Pick your detection mode and upload a photo.</p>
+                <div className="space-y-1">
+                  <h2 className="text-xl font-bold uppercase tracking-tight">Counting Mode</h2>
+                  <p className="text-slate-400 text-xs">Standardize your bowl detection area.</p>
                 </div>
                 <div className="bg-slate-800/50 p-1.5 rounded-2xl border border-slate-700 flex">
                   <button onClick={() => setDetectionMode('circle')} className={`flex items-center gap-2 px-6 py-3 rounded-xl text-xs font-bold transition-all ${detectionMode === 'circle' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400'}`}>
@@ -265,120 +261,134 @@ const App = () => {
           </div>
         )}
 
-        {/* --- Phase 2: Confirm Circle --- */}
+        {/* --- Step 1: Detection Preview --- */}
         {step === 'confirm' && detectionResult && !loading && (
           <div className="flex-1 flex flex-col space-y-6 animate-in slide-in-from-bottom-4 duration-500">
-            <div className="text-center space-y-1">
+            <div className="text-center">
               <h3 className="text-lg font-bold">Bowl Detected</h3>
-              <p className="text-xs text-slate-400">Confirm the area before counting.</p>
+              <p className="text-[10px] text-slate-500 uppercase tracking-widest font-black">Step 1: Verify Detection Area</p>
             </div>
             
-            <div className="relative aspect-[3/4] rounded-[2rem] overflow-hidden border-2 border-slate-800 shadow-2xl bg-black">
-              <img src={detectionResult.preview} className="w-full h-full object-contain" alt="Preview" />
+            <div className="relative aspect-[3/4] rounded-[2rem] overflow-hidden border-2 border-slate-800 shadow-2xl bg-black flex items-center justify-center">
+              <img src={detectionResult.preview} className="max-w-full max-h-full object-contain" alt="Preview" />
             </div>
 
             <div className="grid grid-cols-3 gap-3">
-              <button onClick={handleTryAgain} className="flex flex-col items-center justify-center p-4 bg-slate-800 rounded-2xl border border-slate-700 hover:bg-slate-700">
-                <RotateCcw size={18} className="mb-2 text-blue-400" />
-                <span className="text-[10px] font-bold uppercase tracking-tighter">Try Again ({attempt})</span>
+              <button onClick={handleTryAgain} className="flex flex-col items-center justify-center p-4 bg-slate-800 rounded-2xl border border-slate-700 active:scale-95 transition-all">
+                <RotateCcw size={18} className="mb-1 text-blue-400" />
+                <span className="text-[9px] font-black uppercase tracking-tighter">Rescan ({attempt})</span>
               </button>
-              <button onClick={() => setStep('adjust')} className="flex flex-col items-center justify-center p-4 bg-slate-800 rounded-2xl border border-slate-700 hover:bg-slate-700">
-                <Settings2 size={18} className="mb-2 text-amber-400" />
-                <span className="text-[10px] font-bold uppercase tracking-tighter">Adjust</span>
+              <button onClick={() => setStep('adjust')} className="flex flex-col items-center justify-center p-4 bg-slate-800 rounded-2xl border border-slate-700 active:scale-95 transition-all">
+                <Settings2 size={18} className="mb-1 text-amber-400" />
+                <span className="text-[9px] font-black uppercase tracking-tighter">Adjust</span>
               </button>
-              <button onClick={() => runCount(false)} className="col-span-1 flex flex-col items-center justify-center p-4 bg-emerald-600 rounded-2xl border border-emerald-500 shadow-lg shadow-emerald-500/20">
-                <CheckCircle2 size={18} className="mb-2 text-white" />
-                <span className="text-[10px] font-bold uppercase tracking-tighter">Looks Good</span>
+              <button onClick={() => runCount(false)} className="flex flex-col items-center justify-center p-4 bg-emerald-600 rounded-2xl border border-emerald-500 shadow-lg shadow-emerald-500/20 active:scale-95 transition-all">
+                <CheckCircle2 size={18} className="mb-1 text-white" />
+                <span className="text-[9px] font-black uppercase tracking-tighter">Looks Good</span>
               </button>
             </div>
           </div>
         )}
 
-        {/* --- Phase 3: Adjust Mode --- */}
+        {/* --- Step 2: Manual Adjust Mode --- */}
         {step === 'adjust' && !loading && (
-          <div className="flex-1 flex flex-col space-y-6 animate-in fade-in duration-300">
-            <div className="text-center space-y-1">
-              <h3 className="text-lg font-bold text-amber-400">Manual Adjust</h3>
-              <p className="text-xs text-slate-400">Drag center to move, drag edge to resize.</p>
+          <div className="flex-1 flex flex-col space-y-4 animate-in fade-in duration-300">
+            <div className="text-center">
+              <h3 className="text-lg font-bold text-amber-400 font-black italic">Precision Adjust</h3>
+              <p className="text-[10px] text-slate-500 uppercase tracking-widest font-black">Step 2: Manually Select Area</p>
             </div>
 
             <div 
               ref={adjustContainerRef}
               onMouseDown={handleAdjustStart}
               onTouchStart={handleAdjustStart}
-              className="relative aspect-[3/4] rounded-[2rem] overflow-hidden border-2 border-amber-500/30 shadow-2xl bg-black cursor-move touch-none"
+              className="relative aspect-[3/4] rounded-[2rem] overflow-hidden border-2 border-amber-500/30 shadow-2xl bg-black cursor-crosshair touch-none flex items-center justify-center"
             >
-              <img src={originalFile ? URL.createObjectURL(originalFile) : ''} className="w-full h-full object-contain pointer-events-none opacity-60" alt="Original" />
-              <svg className="absolute inset-0 w-full h-full pointer-events-none">
-                <circle 
-                  cx={`${manualCircle.x_pct * 100}%`} 
-                  cy={`${manualCircle.y_pct * 100}%`} 
-                  r={`${manualCircle.r_pct * 100 * 0.75}%`} // Simple hack for radius viz
-                  fill="rgba(255, 191, 0, 0.2)" 
-                  stroke="#fbbf24" 
-                  strokeWidth="3" 
-                />
-                {/* Visual Handle */}
-                <circle 
-                   cx={`${manualCircle.x_pct * 100}%`} 
-                   cy={`${(manualCircle.y_pct + manualCircle.r_pct * 0.75) * 100}%`} 
-                   r="8" fill="#fbbf24" 
-                />
-              </svg>
+              <img 
+                ref={imageRef}
+                src={originalFile ? URL.createObjectURL(originalFile) : ''} 
+                className="max-w-full max-h-full object-contain pointer-events-none opacity-70 transition-opacity" 
+                alt="Original" 
+              />
+              
+              {/* SVG Perfectly Overlaying the Image Boundaries */}
+              {imageRef.current && (
+                <svg 
+                   style={{
+                     position: 'absolute',
+                     left: imageRef.current.offsetLeft,
+                     top: imageRef.current.offsetTop,
+                     width: imageRef.current.clientWidth,
+                     height: imageRef.current.clientHeight
+                   }}
+                   className="pointer-events-none"
+                >
+                  <circle 
+                    cx={`${manualCircle.x_pct * 100}%`} 
+                    cy={`${manualCircle.y_pct * 100}%`} 
+                    r={`${manualCircle.r_pct * (Math.max(imageRef.current.clientWidth, imageRef.current.clientHeight) / imageRef.current.clientWidth) * 100}%`} 
+                    fill="rgba(251, 191, 36, 0.15)" 
+                    stroke="#fbbf24" 
+                    strokeWidth="3" 
+                  />
+                  <circle cx={`${manualCircle.x_pct * 100}%`} cy={`${manualCircle.y_pct * 100}%`} r="4" fill="#fbbf24" />
+                </svg>
+              )}
+
+              <div className="absolute top-4 left-4 bg-black/80 backdrop-blur px-3 py-1.5 rounded-full border border-amber-500/20 text-[9px] font-mono text-amber-400 tracking-tight flex gap-3">
+                <span>X:{(manualCircle.x_pct*100).toFixed(0)}%</span>
+                <span>Y:{(manualCircle.y_pct*100).toFixed(0)}%</span>
+                <span>R:{(manualCircle.r_pct*100).toFixed(0)}%</span>
+              </div>
+            </div>
+
+            <div className="flex justify-center gap-4">
+              <button 
+                onClick={() => setManualCircle(prev => ({ ...prev, r_pct: Math.max(0.05, prev.r_pct - 0.01) }))}
+                className="flex-1 flex items-center justify-center gap-2 py-4 bg-slate-800 rounded-2xl border border-slate-700 active:bg-slate-700 text-xs font-bold"
+              >
+                <MinusCircle size={18} className="text-red-400" /> Smaller
+              </button>
+              <button 
+                onClick={() => setManualCircle(prev => ({ ...prev, r_pct: Math.min(0.5, prev.r_pct + 0.01) }))}
+                className="flex-1 flex items-center justify-center gap-2 py-4 bg-slate-800 rounded-2xl border border-slate-700 active:bg-slate-700 text-xs font-bold"
+              >
+                <PlusCircle size={18} className="text-emerald-400" /> Larger
+              </button>
             </div>
 
             <button onClick={() => runCount(true)} className="h-16 w-full bg-blue-600 rounded-2xl font-black uppercase tracking-widest shadow-xl active:scale-95 transition-all">
-              Count This Area
+              Count Final Area
             </button>
           </div>
         )}
 
-        {/* --- Phase 4: Result --- */}
+        {/* --- Step 3: Result --- */}
         {step === 'result' && countResult && !loading && (
-          <div className="flex-1 flex flex-col space-y-8 animate-in slide-in-from-bottom-8 duration-700">
-            <div className="text-center space-y-2">
-              <p className="text-xs font-black tracking-[0.3em] text-slate-500 uppercase">Shrimp Count ({detectionMode})</p>
-              <h3 className="text-[7rem] leading-none font-black text-white tracking-tighter drop-shadow-2xl">
+          <div className="flex-1 flex-col space-y-8 animate-in slide-in-from-bottom-8 duration-700 flex">
+            <div className="text-center space-y-1">
+              <p className="text-[10px] font-black tracking-[0.3em] text-slate-500 uppercase">Estimated Shrimp</p>
+              <h3 className="text-[7.5rem] leading-none font-black text-white tracking-tighter drop-shadow-2xl">
                 {countResult.count + manualAdjustment}
               </h3>
-              <div className={`inline-flex px-6 py-2 rounded-full text-xs font-black tracking-widest uppercase shadow-lg ${getConfidenceStyles(countResult.confidence)}`}>
-                {countResult.confidence} Confidence
-              </div>
-              
-              <div className="pt-2">
-                <button onClick={() => setShowBreakdown(!showBreakdown)} className="inline-flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500">
-                  Method Details {showBreakdown ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
-                </button>
-                {showBreakdown && (
-                  <div className="mt-4 p-4 bg-slate-900/50 border border-slate-800 rounded-2xl text-left">
-                    <table className="w-full text-[11px] text-slate-400 font-medium">
-                      <tbody>
-                        {Object.entries(countResult.methods).map(([name, count]) => (
-                          <tr key={name} className="border-b border-slate-800/50">
-                            <td className="py-2 capitalize">{name.replace('_', ' ')}:</td>
-                            <td className="py-2 text-right font-bold text-white">{count}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
+              <div className={`inline-flex px-6 py-2 rounded-full text-[10px] font-black tracking-widest uppercase shadow-lg ${getConfidenceStyles(countResult.confidence)}`}>
+                {countResult.confidence} CONFIDENCE
               </div>
             </div>
 
-            <div className="relative aspect-[3/4] rounded-3xl overflow-hidden border-2 border-slate-800 bg-black">
-              <img src={countResult.overlay} className="w-full h-full object-contain" alt="Final Overlay" />
+            <div className="relative aspect-[3/4] rounded-[2rem] overflow-hidden border-2 border-slate-800 bg-black flex items-center justify-center shadow-inner">
+              <img src={countResult.overlay} className="max-w-full max-h-full object-contain" alt="Final Overlay" />
             </div>
 
             <div className="flex items-center justify-between bg-slate-800/50 rounded-3xl p-2 border border-slate-700">
-              <button onClick={() => setManualAdjustment(prev => prev - 1)} className="h-14 w-20 flex items-center justify-center bg-slate-800 rounded-2xl border border-slate-700 active:bg-slate-700 text-red-400">
+              <button onClick={() => setManualAdjustment(prev => prev - 1)} className="h-14 w-16 flex items-center justify-center bg-slate-800 rounded-2xl border border-slate-700 text-red-400 shadow-sm active:scale-95 transition-all">
                 <Minus size={24} strokeWidth={3} />
               </button>
               <div className="flex flex-col items-center">
-                <span className="text-[10px] font-black uppercase tracking-widest text-slate-500 tracking-tighter">Adjusted</span>
-                <span className="text-xl font-bold">{manualAdjustment > 0 ? `+${manualAdjustment}` : manualAdjustment}</span>
+                <span className="text-[9px] font-black uppercase tracking-widest text-slate-500">Fine Adjustment</span>
+                <span className="text-lg font-bold tabular-nums">{manualAdjustment > 0 ? `+${manualAdjustment}` : manualAdjustment}</span>
               </div>
-              <button onClick={() => setManualAdjustment(prev => prev + 1)} className="h-14 w-20 flex items-center justify-center bg-slate-800 rounded-2xl border border-slate-700 active:bg-slate-700 text-emerald-400">
+              <button onClick={() => setManualAdjustment(prev => prev + 1)} className="h-14 w-16 flex items-center justify-center bg-slate-800 rounded-2xl border border-slate-700 text-emerald-400 shadow-sm active:scale-95 transition-all">
                 <Plus size={24} strokeWidth={3} />
               </button>
             </div>
@@ -387,8 +397,8 @@ const App = () => {
 
         {loading && (
           <div className="flex-1 flex flex-col items-center justify-center space-y-4 animate-pulse">
-            <Loader2 size={48} className="text-blue-400 animate-spin" />
-            <p className="text-lg font-bold tracking-widest text-blue-400 uppercase">Processing...</p>
+            <Loader2 size={56} className="text-blue-500 animate-spin" />
+            <p className="text-sm font-black tracking-[0.2em] text-blue-400 uppercase">Processing...</p>
           </div>
         )}
       </main>
@@ -396,11 +406,11 @@ const App = () => {
       {step === 'idle' && !loading && (
         <footer className="fixed bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-[#0f172a] via-[#0f172a]/95 to-transparent z-40">
           <div className="max-w-md mx-auto flex gap-4">
-            <button onClick={startCamera} className={`flex-1 h-14 flex items-center justify-center gap-2 rounded-2xl font-bold transition-all ${mode === 'camera' ? 'bg-blue-600 shadow-lg' : 'bg-slate-800 text-slate-300 border border-slate-700'}`}>
-              <Camera size={20} /><span>Camera</span>
+            <button onClick={startCamera} className={`flex-1 h-16 flex items-center justify-center gap-3 rounded-2xl font-black uppercase text-xs transition-all ${mode === 'camera' ? 'bg-blue-600 shadow-lg' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}>
+              <Camera size={20} /> Camera
             </button>
-            <button onClick={() => {stopCamera(); setMode('upload');}} className={`flex-1 h-14 flex items-center justify-center gap-2 rounded-2xl font-bold transition-all ${mode === 'upload' ? 'bg-blue-600 shadow-lg' : 'bg-slate-800 text-slate-300 border border-slate-700'}`}>
-              <Upload size={20} /><span>Upload</span>
+            <button onClick={() => {stopCamera(); setMode('upload');}} className={`flex-1 h-16 flex items-center justify-center gap-3 rounded-2xl font-black uppercase text-xs transition-all ${mode === 'upload' ? 'bg-blue-600 shadow-lg' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}>
+              <Upload size={20} /> Upload
             </button>
           </div>
         </footer>
