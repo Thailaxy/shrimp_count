@@ -7,3 +7,4 @@ uvicorn
 python-multipart
 gunicorn
 boto3
+python-dotenv

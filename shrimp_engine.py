@@ -17,6 +17,14 @@ class Circle:
 
 
 @dataclass
+class Rectangle:
+    x: int
+    y: int
+    w: int
+    h: int
+
+
+@dataclass
 class CountMethodResult:
     name: str
     count: int
@@ -99,10 +107,79 @@ def resize_for_counting(image: np.ndarray, circle: Circle, target_size: int) -> 
     return resized, scaled_circle
 
 
+def rectangle_from_circle(
+    circle: Circle,
+    image_shape: tuple[int, int] | None = None,
+    shrink: float = 0.88,
+) -> Rectangle:
+    half_side = max(1, int(round((circle.r * shrink) / np.sqrt(2))))
+    rect = Rectangle(
+        x=circle.x - half_side,
+        y=circle.y - half_side,
+        w=half_side * 2,
+        h=half_side * 2,
+    )
+
+    if image_shape is None:
+        return rect
+
+    height, width = image_shape[:2]
+    x = min(max(0, rect.x), max(0, width - 1))
+    y = min(max(0, rect.y), max(0, height - 1))
+    w = min(rect.w, max(1, width - x))
+    h = min(rect.h, max(1, height - y))
+    return Rectangle(x=x, y=y, w=w, h=h)
+
+
+def resize_selection_for_counting(
+    image: np.ndarray,
+    selection: Circle | Rectangle,
+    target_size: int,
+) -> tuple[np.ndarray, Circle | Rectangle]:
+    if isinstance(selection, Circle):
+        return resize_for_counting(image, selection, target_size)
+
+    scale = target_size / max(image.shape[:2])
+    resized = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    scaled_rect = Rectangle(
+        x=int(round(selection.x * scale)),
+        y=int(round(selection.y * scale)),
+        w=max(1, int(round(selection.w * scale))),
+        h=max(1, int(round(selection.h * scale))),
+    )
+    return resized, scaled_rect
+
+
 def build_mask(shape: tuple[int, int], circle: Circle, shrink: float) -> np.ndarray:
     mask = np.zeros(shape, np.uint8)
     cv2.circle(mask, (circle.x, circle.y), int(circle.r * shrink), 255, -1)
     return mask
+
+
+def build_rectangle_mask(shape: tuple[int, int], rectangle: Rectangle, shrink: float) -> np.ndarray:
+    mask = np.zeros(shape, np.uint8)
+    shrink = max(0.1, min(shrink, 1.0))
+    cx = rectangle.x + (rectangle.w / 2.0)
+    cy = rectangle.y + (rectangle.h / 2.0)
+    half_w = max(1, int(round((rectangle.w * shrink) / 2.0)))
+    half_h = max(1, int(round((rectangle.h * shrink) / 2.0)))
+
+    x1 = max(0, int(round(cx - half_w)))
+    y1 = max(0, int(round(cy - half_h)))
+    x2 = min(shape[1], int(round(cx + half_w)))
+    y2 = min(shape[0], int(round(cy + half_h)))
+    mask[y1:y2, x1:x2] = 255
+    return mask
+
+
+def build_selection_mask(
+    shape: tuple[int, int],
+    selection: Circle | Rectangle,
+    shrink: float,
+) -> np.ndarray:
+    if isinstance(selection, Circle):
+        return build_mask(shape, selection, shrink)
+    return build_rectangle_mask(shape, selection, shrink)
 
 
 def preprocess(gray: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -186,7 +263,7 @@ def choose_consensus(results: list[CountMethodResult]) -> tuple[int, CountMethod
 
 def create_overlay(
     image: np.ndarray,
-    circle: Circle,
+    selection: Circle | Rectangle,
     mask: np.ndarray,
     result: CountMethodResult,
     consensus: int,
@@ -197,7 +274,13 @@ def create_overlay(
     masked[mask == 0] = (masked[mask == 0] * 0.35).astype(np.uint8)
     overlay = cv2.addWeighted(overlay, 0.55, masked, 0.45, 0)
 
-    cv2.circle(overlay, (circle.x, circle.y), circle.r, (0, 255, 255), 2)
+    if isinstance(selection, Circle):
+        cv2.circle(overlay, (selection.x, selection.y), selection.r, (0, 255, 255), 2)
+    else:
+        top_left = (selection.x, selection.y)
+        bottom_right = (selection.x + selection.w, selection.y + selection.h)
+        cv2.rectangle(overlay, top_left, bottom_right, (0, 255, 255), 2)
+
     for point in result.points:
         cv2.circle(overlay, (int(round(point[0])), int(round(point[1]))), 3, (0, 0, 255), -1)
 
@@ -240,9 +323,9 @@ def main() -> None:
 
     image = load_image(args.image)
     bowl = detect_bowl_circle(image)
-    resized, resized_circle = resize_for_counting(image, bowl, args.target_size)
+    resized, resized_circle = resize_selection_for_counting(image, bowl, args.target_size)
     gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-    mask = build_mask(gray.shape, resized_circle, args.mask_shrink)
+    mask = build_selection_mask(gray.shape, resized_circle, args.mask_shrink)
     clahe, blackhat = preprocess(gray)
 
     scale_factor = args.target_size / 1200.0
@@ -276,7 +359,7 @@ def main() -> None:
         "confidence": confidence,
         "confidence_flag": spread > consensus * 0.30,
         "methods": {result.name: result.count for result in results},
-        "mask_circle": {"x": resized_circle.x, "y": resized_circle.y, "r": resized_circle.r},
+        "mask_shape": {"type": "circle", "x": resized_circle.x, "y": resized_circle.y, "r": resized_circle.r},
         "mask_shrink": args.mask_shrink,
         "overlay_points_from": overlay_result.name,
         "overlay_path": str(overlay_path),

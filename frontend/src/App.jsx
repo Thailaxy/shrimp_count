@@ -1,40 +1,68 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import imageCompression from 'browser-image-compression';
-import { 
-  Camera, Upload, RefreshCw, AlertTriangle, Minus, Plus, 
-  Loader2, ChevronDown, ChevronUp, Box, Circle as CircleIcon, 
-  CheckCircle2, Settings2, RotateCcw 
+import {
+  Camera, Upload, AlertTriangle, Minus, Plus,
+  Loader2, ChevronDown, ChevronUp, Box, Circle as CircleIcon,
+  CheckCircle2, Settings2, RotateCcw
 } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const MIN_CIRCLE_RADIUS = 0.04;
+const CIRCLE_SIZE_STEP = 0.015;
+const MIN_RECT_SIZE = 0.16;
+const RECT_SIZE_STEP = 0.04;
+
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
 const App = () => {
-  // Core State
   const [stream, setStream] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [mode, setMode] = useState(null); // null, 'camera', or 'upload'
-  
-  // Image & Detection State
+  const [mode, setMode] = useState(null);
+
   const [originalFile, setOriginalFile] = useState(null);
+  const [originalPreviewUrl, setOriginalPreviewUrl] = useState(null);
   const [detectionMode, setDetectionMode] = useState('circle');
-  const [detectionResult, setDetectionData] = useState(null); // Result from /detect
-  const [manualCircle, setManualCircle] = useState(null); // Adjusted {x_pct, y_pct, r_pct}
+  const [detectionResult, setDetectionData] = useState(null);
+  const [manualShape, setManualShape] = useState(null);
   const [attempt, setAttempt] = useState(1);
-  
-  // Final Result State
+  const [adjustImageBox, setAdjustImageBox] = useState(null);
+
   const [countResult, setCountResult] = useState(null);
   const [manualAdjustment, setManualAdjustment] = useState(0);
   const [showBreakdown, setShowBreakdown] = useState(false);
+  const [historyItems, setHistoryItems] = useState([]);
 
-  // Workflow Step: 'idle' | 'confirm' | 'adjust' | 'result'
   const [step, setStep] = useState('idle');
 
   const videoRef = useRef(null);
   const adjustContainerRef = useRef(null);
+  const adjustImageRef = useRef(null);
+  const previewUrlRef = useRef(null);
 
-  // --- Helpers ---
+  const updateOriginalPreviewUrl = useCallback((file) => {
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = null;
+    }
+
+    if (!file) {
+      setOriginalPreviewUrl(null);
+      return;
+    }
+
+    const nextUrl = URL.createObjectURL(file);
+    previewUrlRef.current = nextUrl;
+    setOriginalPreviewUrl(nextUrl);
+  }, []);
+
+  useEffect(() => () => {
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
+    }
+  }, []);
+
   const stopCamera = useCallback(() => {
     if (stream) {
       stream.getTracks().forEach(track => track.stop());
@@ -42,46 +70,177 @@ const App = () => {
     }
   }, [stream]);
 
-  const resetAll = () => {
+  const createFallbackShape = useCallback(() => {
+    if (detectionMode === 'rectangle') {
+      return { type: 'rectangle', x_pct: 0.2, y_pct: 0.2, w_pct: 0.6, h_pct: 0.6 };
+    }
+    return { type: 'circle', x_pct: 0.5, y_pct: 0.5, r_pct: 0.3 };
+  }, [detectionMode]);
+
+  const resetAll = useCallback(() => {
     stopCamera();
+    updateOriginalPreviewUrl(null);
     setOriginalFile(null);
     setDetectionData(null);
-    setManualCircle(null);
+    setManualShape(null);
+    setAdjustImageBox(null);
     setCountResult(null);
     setManualAdjustment(0);
+    setHistoryItems([]);
     setError(null);
     setAttempt(1);
     setStep('idle');
     setMode(null);
-  };
+  }, [stopCamera, updateOriginalPreviewUrl]);
 
-  // --- Step 1: Detect ---
-  const startDetection = async (file) => {
+  const getImageNaturalSize = useCallback(() => {
+    const image = adjustImageRef.current;
+    if (image?.naturalWidth && image?.naturalHeight) {
+      return { width: image.naturalWidth, height: image.naturalHeight };
+    }
+    return { width: 1, height: 1 };
+  }, []);
+
+  const fitCircleToImage = useCallback((circle) => {
+    const { width, height } = getImageNaturalSize();
+    const maxEdge = Math.max(width, height);
+    const xPct = clamp(circle.x_pct, 0, 1);
+    const yPct = clamp(circle.y_pct, 0, 1);
+    const maxRadiusByBounds = Math.min(
+      (xPct * width) / maxEdge,
+      ((1 - xPct) * width) / maxEdge,
+      (yPct * height) / maxEdge,
+      ((1 - yPct) * height) / maxEdge
+    );
+    const rPct = clamp(
+      circle.r_pct,
+      MIN_CIRCLE_RADIUS,
+      Math.max(MIN_CIRCLE_RADIUS, maxRadiusByBounds)
+    );
+    return { ...circle, x_pct: xPct, y_pct: yPct, r_pct: rPct };
+  }, [getImageNaturalSize]);
+
+  const fitRectangleToImage = useCallback((rectangle) => {
+    const wPct = clamp(rectangle.w_pct, MIN_RECT_SIZE, 1);
+    const hPct = clamp(rectangle.h_pct, MIN_RECT_SIZE, 1);
+    const xPct = clamp(rectangle.x_pct, 0, 1 - wPct);
+    const yPct = clamp(rectangle.y_pct, 0, 1 - hPct);
+    return { ...rectangle, x_pct: xPct, y_pct: yPct, w_pct: wPct, h_pct: hPct };
+  }, []);
+
+  const normalizeSelection = useCallback((selection) => {
+    if (!selection) {
+      return createFallbackShape();
+    }
+
+    if (selection.type === 'rectangle' || selection.w_pct !== undefined) {
+      return fitRectangleToImage({
+        type: 'rectangle',
+        x_pct: selection.x_pct,
+        y_pct: selection.y_pct,
+        w_pct: selection.w_pct,
+        h_pct: selection.h_pct,
+      });
+    }
+
+    return {
+      type: 'circle',
+      x_pct: clamp(selection.x_pct, 0, 1),
+      y_pct: clamp(selection.y_pct, 0, 1),
+      r_pct: clamp(selection.r_pct, MIN_CIRCLE_RADIUS, 0.49),
+    };
+  }, [createFallbackShape, fitRectangleToImage]);
+
+  const measureAdjustImageBox = useCallback(() => {
+    const container = adjustContainerRef.current;
+    const image = adjustImageRef.current;
+    if (!container || !image?.naturalWidth || !image?.naturalHeight) {
+      return null;
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    const naturalWidth = image.naturalWidth;
+    const naturalHeight = image.naturalHeight;
+    const scale = Math.min(containerRect.width / naturalWidth, containerRect.height / naturalHeight);
+    const width = naturalWidth * scale;
+    const height = naturalHeight * scale;
+    const left = (containerRect.width - width) / 2;
+    const top = (containerRect.height - height) / 2;
+
+    return {
+      left,
+      top,
+      width,
+      height,
+      naturalWidth,
+      naturalHeight,
+      clientLeft: containerRect.left + left,
+      clientTop: containerRect.top + top,
+    };
+  }, []);
+
+  const updateAdjustImageBox = useCallback(() => {
+    const nextBox = measureAdjustImageBox();
+    if (nextBox) {
+      setAdjustImageBox(nextBox);
+    }
+  }, [measureAdjustImageBox]);
+
+  useEffect(() => {
+    const onResize = () => updateAdjustImageBox();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [updateAdjustImageBox]);
+
+  useEffect(() => {
+    if (step !== 'adjust') {
+      return undefined;
+    }
+
+    const frame = window.requestAnimationFrame(() => updateAdjustImageBox());
+    return () => window.cancelAnimationFrame(frame);
+  }, [step, originalPreviewUrl, updateAdjustImageBox]);
+
+  const getPointerPosition = useCallback((event) => {
+    const imageBox = measureAdjustImageBox();
+    if (!imageBox) {
+      return null;
+    }
+
+    const point = event.touches ? event.touches[0] : event;
+    return {
+      x_pct: clamp((point.clientX - imageBox.clientLeft) / imageBox.width, 0, 1),
+      y_pct: clamp((point.clientY - imageBox.clientTop) / imageBox.height, 0, 1),
+    };
+  }, [measureAdjustImageBox]);
+
+  const startDetection = async (file, attemptOverride = attempt) => {
     setLoading(true);
     setError(null);
     setOriginalFile(file);
+    updateOriginalPreviewUrl(file);
     try {
-      // Compress first
       const compressed = await imageCompression(file, { maxSizeMB: 0.5, maxWidthOrHeight: 1400 });
-      
+
       const formData = new FormData();
       formData.append('file', compressed);
-      formData.append('attempt', attempt);
+      formData.append('attempt', attemptOverride);
+      formData.append('detection_mode', detectionMode);
 
       const response = await axios.post(`${API_URL}/detect`, formData);
-      
+
       if (response.data.error) {
-        // Fallback to manual adjust if detection fails completely
-        setError(response.data.error + " - Try manual adjustment.");
+        setError(`${response.data.error} - Try manual adjustment.`);
         setStep('adjust');
-        setManualCircle({ x_pct: 0.5, y_pct: 0.5, r_pct: 0.3 });
+        setManualShape(createFallbackShape());
       } else {
-        setDetectionData(response.data);
-        setManualCircle(response.data.circle);
+        const selection = normalizeSelection(response.data.selection || response.data.circle);
+        setDetectionData({ ...response.data, selection });
+        setManualShape(selection);
         setStep('confirm');
       }
-    } catch (err) {
-      setError("Connection error. Is the backend running?");
+    } catch {
+      setError('Connection error. Is the backend running?');
     } finally {
       setLoading(false);
     }
@@ -90,31 +249,39 @@ const App = () => {
   const handleTryAgain = () => {
     const nextAttempt = attempt >= 3 ? 1 : attempt + 1;
     setAttempt(nextAttempt);
-    if (originalFile) startDetection(originalFile);
+    if (originalFile) {
+      startDetection(originalFile, nextAttempt);
+    }
   };
 
-  // --- Step 2: Adjust Logic ---
-  const handleAdjustStart = (e) => {
-    if (step !== 'adjust') return;
-    const rect = adjustContainerRef.current.getBoundingClientRect();
-    const touch = e.touches ? e.touches[0] : e;
-    const x = (touch.clientX - rect.left) / rect.width;
-    const y = (touch.clientY - rect.top) / rect.height;
-    
-    // Simple logic: if click near center, drag. If click near edge, resize.
-    const dist = Math.sqrt(Math.pow(x - manualCircle.x_pct, 2) + Math.pow(y - manualCircle.y_pct, 2));
-    const isEdge = Math.abs(dist - manualCircle.r_pct) < 0.05;
+  const handleAdjustStart = (event) => {
+    if (step !== 'adjust' || !manualShape) return;
+
+    const startPointer = getPointerPosition(event);
+    if (!startPointer) return;
+
+    event.preventDefault();
+    const startShape = manualShape;
 
     const moveHandler = (moveEvent) => {
-      const mTouch = moveEvent.touches ? moveEvent.touches[0] : moveEvent;
-      const mx = (mTouch.clientX - rect.left) / rect.width;
-      const my = (mTouch.clientY - rect.top) / rect.height;
+      const nextPointer = getPointerPosition(moveEvent);
+      if (!nextPointer) return;
 
-      if (isEdge) {
-        const newR = Math.sqrt(Math.pow(mx - manualCircle.x_pct, 2) + Math.pow(my - manualCircle.y_pct, 2));
-        setManualCircle(prev => ({ ...prev, r_pct: newR }));
+      const dx = nextPointer.x_pct - startPointer.x_pct;
+      const dy = nextPointer.y_pct - startPointer.y_pct;
+
+      if (startShape.type === 'rectangle') {
+        setManualShape(fitRectangleToImage({
+          ...startShape,
+          x_pct: startShape.x_pct + dx,
+          y_pct: startShape.y_pct + dy,
+        }));
       } else {
-        setManualCircle(prev => ({ ...prev, x_pct: mx, y_pct: my }));
+        setManualShape(fitCircleToImage({
+          ...startShape,
+          x_pct: startShape.x_pct + dx,
+          y_pct: startShape.y_pct + dy,
+        }));
       }
     };
 
@@ -127,11 +294,35 @@ const App = () => {
 
     window.addEventListener('mousemove', moveHandler);
     window.addEventListener('mouseup', upHandler);
-    window.addEventListener('touchmove', moveHandler);
+    window.addEventListener('touchmove', moveHandler, { passive: false });
     window.addEventListener('touchend', upHandler);
   };
 
-  // --- Step 3: Count ---
+  const resizeManualShape = (direction) => {
+    if (!manualShape) return;
+
+    if (manualShape.type === 'rectangle') {
+      const delta = direction * RECT_SIZE_STEP;
+      const nextWidth = manualShape.w_pct + delta;
+      const nextHeight = manualShape.h_pct + delta;
+      const centerX = manualShape.x_pct + (manualShape.w_pct / 2);
+      const centerY = manualShape.y_pct + (manualShape.h_pct / 2);
+      setManualShape(fitRectangleToImage({
+        ...manualShape,
+        x_pct: centerX - (nextWidth / 2),
+        y_pct: centerY - (nextHeight / 2),
+        w_pct: nextWidth,
+        h_pct: nextHeight,
+      }));
+      return;
+    }
+
+    setManualShape(fitCircleToImage({
+      ...manualShape,
+      r_pct: manualShape.r_pct + (direction * CIRCLE_SIZE_STEP),
+    }));
+  };
+
   const runCount = async (isManual = false) => {
     setLoading(true);
     setError(null);
@@ -139,29 +330,65 @@ const App = () => {
       const compressed = await imageCompression(originalFile, { maxSizeMB: 0.5, maxWidthOrHeight: 1400 });
       const formData = new FormData();
       formData.append('file', compressed);
-      formData.append('detection_mode', detectionMode);
-      
-      const coords = isManual ? manualCircle : detectionResult.circle;
-      formData.append('cx_pct', coords.x_pct);
-      formData.append('cy_pct', coords.y_pct);
-      formData.append('r_pct', coords.r_pct);
+
+      const selection = isManual ? manualShape : detectionResult?.selection;
+      const normalizedSelection = normalizeSelection(selection);
+      formData.append('detection_mode', normalizedSelection.type);
+
+      if (normalizedSelection.type === 'rectangle') {
+        formData.append('rect_x_pct', normalizedSelection.x_pct);
+        formData.append('rect_y_pct', normalizedSelection.y_pct);
+        formData.append('rect_w_pct', normalizedSelection.w_pct);
+        formData.append('rect_h_pct', normalizedSelection.h_pct);
+      } else {
+        formData.append('cx_pct', normalizedSelection.x_pct);
+        formData.append('cy_pct', normalizedSelection.y_pct);
+        formData.append('r_pct', normalizedSelection.r_pct);
+      }
 
       const response = await axios.post(`${API_URL}/count`, formData);
-      
+
       if (response.data.error) {
         setError(response.data.error);
       } else {
         setCountResult(response.data);
         setStep('result');
       }
-    } catch (err) {
-      setError("Failed to process count.");
+    } catch {
+      setError('Failed to process count.');
     } finally {
       setLoading(false);
     }
   };
 
-  // --- Camera Actions ---
+  const loadHistory = async () => {
+    stopCamera();
+    setMode(null);
+    setStep('history');
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await axios.get(`${API_URL}/history`, { params: { limit: 15 } });
+      setHistoryItems(response.data.items || []);
+      if (response.data.error) {
+        setError(response.data.error);
+      }
+    } catch {
+      setError('Failed to load history.');
+      setHistoryItems([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAdjustBack = () => {
+    if (detectionResult) {
+      setStep('confirm');
+      return;
+    }
+    resetAll();
+  };
+
   const startCamera = async () => {
     resetAll();
     setMode('camera');
@@ -170,37 +397,93 @@ const App = () => {
         video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }
       });
       setStream(mediaStream);
-      setTimeout(() => { if (videoRef.current) videoRef.current.srcObject = mediaStream; }, 100);
-    } catch (err) {
-      setError("Camera access denied.");
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = mediaStream;
+        }
+      }, 100);
+    } catch {
+      setError('Camera access denied.');
       setMode('upload');
     }
   };
 
-  const capture = useCallback(() => {
+  const capture = () => {
     if (videoRef.current) {
       const canvas = document.createElement('canvas');
       canvas.width = videoRef.current.videoWidth;
       canvas.height = videoRef.current.videoHeight;
       canvas.getContext('2d').drawImage(videoRef.current, 0, 0);
       canvas.toBlob((blob) => {
-        const file = new File([blob], "capture.jpg", { type: "image/jpeg" });
+        const file = new File([blob], 'capture.jpg', { type: 'image/jpeg' });
         startDetection(file);
       }, 'image/jpeg', 0.95);
       stopCamera();
     }
-  }, [videoRef, attempt]);
+  };
 
-  const handleFileUpload = (e) => {
-    const file = e.target.files[0];
+  const handleFileUpload = (event) => {
+    const file = event.target.files[0];
     if (file) startDetection(file);
   };
 
-  // --- Render Helpers ---
   const getConfidenceStyles = (conf) => {
     if (conf === 'HIGH') return 'bg-emerald-500 text-white';
     if (conf === 'MEDIUM') return 'bg-amber-500 text-slate-900';
     return 'bg-red-500 text-white';
+  };
+
+  const renderManualOverlay = () => {
+    if (!manualShape || !adjustImageBox) return null;
+
+    const { naturalWidth, naturalHeight, left, top, width, height } = adjustImageBox;
+    const sharedProps = {
+      fill: 'rgba(255, 191, 0, 0.2)',
+      stroke: '#fbbf24',
+      strokeWidth: 3,
+    };
+
+    return (
+      <div
+        className="absolute pointer-events-none"
+        style={{ left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px` }}
+      >
+        <svg className="w-full h-full" viewBox={`0 0 ${naturalWidth} ${naturalHeight}`}>
+          {manualShape.type === 'rectangle' ? (
+            <>
+              <rect
+                x={manualShape.x_pct * naturalWidth}
+                y={manualShape.y_pct * naturalHeight}
+                width={manualShape.w_pct * naturalWidth}
+                height={manualShape.h_pct * naturalHeight}
+                {...sharedProps}
+              />
+              <circle
+                cx={(manualShape.x_pct + manualShape.w_pct) * naturalWidth}
+                cy={(manualShape.y_pct + manualShape.h_pct) * naturalHeight}
+                r="9"
+                fill="#fbbf24"
+              />
+            </>
+          ) : (
+            <>
+              <circle
+                cx={manualShape.x_pct * naturalWidth}
+                cy={manualShape.y_pct * naturalHeight}
+                r={manualShape.r_pct * Math.max(naturalWidth, naturalHeight)}
+                {...sharedProps}
+              />
+              <circle
+                cx={(manualShape.x_pct * naturalWidth) + (manualShape.r_pct * Math.max(naturalWidth, naturalHeight))}
+                cy={manualShape.y_pct * naturalHeight}
+                r="9"
+                fill="#fbbf24"
+              />
+            </>
+          )}
+        </svg>
+      </div>
+    );
   };
 
   return (
@@ -208,7 +491,7 @@ const App = () => {
       <header className="sticky top-0 z-30 w-full bg-slate-900/80 backdrop-blur-md border-b border-slate-800 px-6 py-4">
         <div className="max-w-md mx-auto flex items-center justify-between">
           <h1 className="text-xl font-bold tracking-tight">🦐 ShrimpCount</h1>
-          {(step !== 'idle') && (
+          {step !== 'idle' && (
             <button onClick={resetAll} className="text-xs font-bold uppercase tracking-widest text-slate-400">Reset</button>
           )}
         </div>
@@ -222,7 +505,6 @@ const App = () => {
           </div>
         )}
 
-        {/* --- Phase 1: Idle/Input --- */}
         {step === 'idle' && !loading && (
           <div className="flex-1 flex flex-col items-center justify-center text-center space-y-8 animate-in fade-in duration-500">
             {mode === 'camera' ? (
@@ -265,14 +547,50 @@ const App = () => {
           </div>
         )}
 
-        {/* --- Phase 2: Confirm Circle --- */}
+        {step === 'history' && !loading && (
+          <div className="flex-1 flex flex-col space-y-4 animate-in fade-in duration-300 pb-4">
+            <div className="text-center space-y-1">
+              <h3 className="text-lg font-bold">Recent Counts</h3>
+              <p className="text-xs text-slate-400">Latest 15 successful counts saved to history.</p>
+            </div>
+
+            {historyItems.length === 0 ? (
+              <div className="flex-1 flex items-center justify-center rounded-[2rem] border border-slate-800 bg-slate-900/40 px-6 text-center text-sm text-slate-400">
+                No saved history yet.
+              </div>
+            ) : (
+              <div className="grid gap-4">
+                {historyItems.map((item) => (
+                  <div key={item.id} className="overflow-hidden rounded-[1.75rem] border border-slate-800 bg-slate-900/50 shadow-xl">
+                    <div className="aspect-[4/3] bg-black">
+                      <img src={item.image} className="w-full h-full object-cover" alt={`History ${item.timestamp}`} />
+                    </div>
+                    <div className="space-y-3 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-[10px] font-black uppercase tracking-[0.25em] text-slate-500">{item.detection_mode}</p>
+                          <p className="text-3xl font-black text-white leading-none">{item.count ?? '-'}</p>
+                        </div>
+                        <div className={`inline-flex px-3 py-1 rounded-full text-[10px] font-black tracking-widest uppercase ${getConfidenceStyles(item.confidence)}`}>
+                          {item.confidence || 'N/A'}
+                        </div>
+                      </div>
+                      <p className="text-xs text-slate-400">{item.timestamp || 'Unknown timestamp'}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {step === 'confirm' && detectionResult && !loading && (
           <div className="flex-1 flex flex-col space-y-6 animate-in slide-in-from-bottom-4 duration-500">
             <div className="text-center space-y-1">
-              <h3 className="text-lg font-bold">Bowl Detected</h3>
+              <h3 className="text-lg font-bold">Area Detected</h3>
               <p className="text-xs text-slate-400">Confirm the area before counting.</p>
             </div>
-            
+
             <div className="relative aspect-[3/4] rounded-[2rem] overflow-hidden border-2 border-slate-800 shadow-2xl bg-black">
               <img src={detectionResult.preview} className="w-full h-full object-contain" alt="Preview" />
             </div>
@@ -294,57 +612,64 @@ const App = () => {
           </div>
         )}
 
-        {/* --- Phase 3: Adjust Mode --- */}
-        {step === 'adjust' && !loading && (
+        {step === 'adjust' && !loading && manualShape && (
           <div className="flex-1 flex flex-col space-y-6 animate-in fade-in duration-300">
             <div className="text-center space-y-1">
               <h3 className="text-lg font-bold text-amber-400">Manual Adjust</h3>
-              <p className="text-xs text-slate-400">Drag center to move, drag edge to resize.</p>
+              <p className="text-xs text-slate-400">Drag to move. Use - / + to resize the area.</p>
             </div>
 
-            <div 
+            <div
               ref={adjustContainerRef}
               onMouseDown={handleAdjustStart}
               onTouchStart={handleAdjustStart}
               className="relative aspect-[3/4] rounded-[2rem] overflow-hidden border-2 border-amber-500/30 shadow-2xl bg-black cursor-move touch-none"
             >
-              <img src={originalFile ? URL.createObjectURL(originalFile) : ''} className="w-full h-full object-contain pointer-events-none opacity-60" alt="Original" />
-              <svg className="absolute inset-0 w-full h-full pointer-events-none">
-                <circle 
-                  cx={`${manualCircle.x_pct * 100}%`} 
-                  cy={`${manualCircle.y_pct * 100}%`} 
-                  r={`${manualCircle.r_pct * 100 * 0.75}%`} // Simple hack for radius viz
-                  fill="rgba(255, 191, 0, 0.2)" 
-                  stroke="#fbbf24" 
-                  strokeWidth="3" 
-                />
-                {/* Visual Handle */}
-                <circle 
-                   cx={`${manualCircle.x_pct * 100}%`} 
-                   cy={`${(manualCircle.y_pct + manualCircle.r_pct * 0.75) * 100}%`} 
-                   r="8" fill="#fbbf24" 
-                />
-              </svg>
+              <img
+                ref={adjustImageRef}
+                src={originalPreviewUrl || ''}
+                onLoad={updateAdjustImageBox}
+                className="w-full h-full object-contain pointer-events-none opacity-60"
+                alt="Original"
+              />
+              {renderManualOverlay()}
             </div>
 
-            <button onClick={() => runCount(true)} className="h-16 w-full bg-blue-600 rounded-2xl font-black uppercase tracking-widest shadow-xl active:scale-95 transition-all">
-              Count This Area
-            </button>
+            <div className="flex items-center justify-between bg-slate-800/50 rounded-3xl p-2 border border-slate-700">
+              <button onClick={() => resizeManualShape(-1)} className="h-14 w-20 flex items-center justify-center bg-slate-800 rounded-2xl border border-slate-700 active:bg-slate-700 text-red-400">
+                <Minus size={24} strokeWidth={3} />
+              </button>
+              <div className="flex flex-col items-center">
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-500 tracking-tighter">Shape</span>
+                <span className="text-sm font-bold capitalize text-white">{manualShape.type}</span>
+              </div>
+              <button onClick={() => resizeManualShape(1)} className="h-14 w-20 flex items-center justify-center bg-slate-800 rounded-2xl border border-slate-700 active:bg-slate-700 text-emerald-400">
+                <Plus size={24} strokeWidth={3} />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <button onClick={handleAdjustBack} className="h-16 w-full bg-slate-800 text-slate-100 rounded-2xl font-black uppercase tracking-widest border border-slate-700 active:scale-95 transition-all">
+                Back
+              </button>
+              <button onClick={() => runCount(true)} className="h-16 w-full bg-blue-600 rounded-2xl font-black uppercase tracking-widest shadow-xl active:scale-95 transition-all">
+                Count This Area
+              </button>
+            </div>
           </div>
         )}
 
-        {/* --- Phase 4: Result --- */}
         {step === 'result' && countResult && !loading && (
           <div className="flex-1 flex flex-col space-y-8 animate-in slide-in-from-bottom-8 duration-700">
             <div className="text-center space-y-2">
-              <p className="text-xs font-black tracking-[0.3em] text-slate-500 uppercase">Shrimp Count ({detectionMode})</p>
+              <p className="text-xs font-black tracking-[0.3em] text-slate-500 uppercase">Shrimp Count ({countResult.detection_mode})</p>
               <h3 className="text-[7rem] leading-none font-black text-white tracking-tighter drop-shadow-2xl">
                 {countResult.count + manualAdjustment}
               </h3>
               <div className={`inline-flex px-6 py-2 rounded-full text-xs font-black tracking-widest uppercase shadow-lg ${getConfidenceStyles(countResult.confidence)}`}>
                 {countResult.confidence} Confidence
               </div>
-              
+
               <div className="pt-2">
                 <button onClick={() => setShowBreakdown(!showBreakdown)} className="inline-flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500">
                   Method Details {showBreakdown ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
@@ -393,14 +718,17 @@ const App = () => {
         )}
       </main>
 
-      {step === 'idle' && !loading && (
-        <footer className="fixed bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-[#0f172a] via-[#0f172a]/95 to-transparent z-40">
-          <div className="max-w-md mx-auto flex gap-4">
-            <button onClick={startCamera} className={`flex-1 h-14 flex items-center justify-center gap-2 rounded-2xl font-bold transition-all ${mode === 'camera' ? 'bg-blue-600 shadow-lg' : 'bg-slate-800 text-slate-300 border border-slate-700'}`}>
+      {(step === 'idle' || step === 'history') && !loading && (
+        <footer className="fixed bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-[#0f172a] via-[#0f172a]/95 to-transparent z-40">
+          <div className="max-w-md mx-auto grid grid-cols-3 gap-3">
+            <button onClick={startCamera} className={`h-12 flex items-center justify-center gap-2 rounded-2xl font-bold text-sm transition-all ${mode === 'camera' ? 'bg-blue-600 shadow-lg' : 'bg-slate-800 text-slate-300 border border-slate-700'}`}>
               <Camera size={20} /><span>Camera</span>
             </button>
-            <button onClick={() => {stopCamera(); setMode('upload');}} className={`flex-1 h-14 flex items-center justify-center gap-2 rounded-2xl font-bold transition-all ${mode === 'upload' ? 'bg-blue-600 shadow-lg' : 'bg-slate-800 text-slate-300 border border-slate-700'}`}>
+            <button onClick={() => { stopCamera(); setStep('idle'); setMode('upload'); }} className={`h-12 flex items-center justify-center gap-2 rounded-2xl font-bold text-sm transition-all ${mode === 'upload' && step === 'idle' ? 'bg-blue-600 shadow-lg' : 'bg-slate-800 text-slate-300 border border-slate-700'}`}>
               <Upload size={20} /><span>Upload</span>
+            </button>
+            <button onClick={loadHistory} className={`h-12 flex items-center justify-center gap-2 rounded-2xl font-bold text-sm transition-all ${step === 'history' ? 'bg-blue-600 shadow-lg text-white' : 'bg-slate-800 text-slate-300 border border-slate-700'}`}>
+              <span>History</span>
             </button>
           </div>
         </footer>
